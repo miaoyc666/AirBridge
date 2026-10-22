@@ -67,17 +67,11 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val device = pendingDevice ?: return@registerForActivityResult
             if (result.resultCode == RESULT_OK && result.data != null) {
-                val intent = Intent(this, CastService::class.java)
-                    .setAction(CastService.ACTION_START)
-                    .putExtra(CastService.EXTRA_RESULT_CODE, result.resultCode)
-                    .putExtra(CastService.EXTRA_DATA, result.data)
-                    .putExtra(CastService.EXTRA_HOST, device.host)
-                    .putExtra(CastService.EXTRA_PORT, device.port)
-                    .putExtra(CastService.EXTRA_NAME, device.name)
-                ContextCompat.startForegroundService(this, intent)
+                CastController.startFirst(this, result.resultCode, result.data!!, device)
             } else {
-                CastController.addLog("未获得屏幕/音频捕获授权")
+                CastController.addLog("未获得音频捕获授权")
             }
+            pendingDevice = null
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -105,14 +99,28 @@ class MainActivity : ComponentActivity() {
         CastController.loadManual(applicationContext)
         CastController.startDiscovery(applicationContext)
         setContent {
-            App(onConnect = { device -> connect(device) })
+            App(
+                onConnect = { device -> connect(device) },
+                onDisconnect = { device -> CastController.removeDevice(this, device) }
+            )
         }
     }
 
     private fun connect(device: AirplayDevice) {
+        // 已存在投射会话：直接把新设备加入，无需再次授权音频捕获
+        if (CastController.anyConnected()) {
+            CastController.addDevice(this, device)
+            return
+        }
+        // 首次连接：申请音频捕获授权（Android 14+ 使用仅音频模式，不再弹“屏幕录制”）
         pendingDevice = device
         val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projectionLauncher.launch(mpm.createScreenCaptureIntent())
+        val captureIntent = mpm.createScreenCaptureIntent()
+        if (Build.VERSION.SDK_INT >= 34) {
+            // 仅音频捕获：AOSP 常量 EXTRA_CAPTURE_AUDIO_ONLY 的字符串值（部分 SDK 未导出该符号）
+            captureIntent.putExtra("android.media.projection.extra.EXTRA_CAPTURE_AUDIO_ONLY", true)
+        }
+        projectionLauncher.launch(captureIntent)
     }
 
     override fun onDestroy() {
@@ -123,7 +131,10 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun App(onConnect: (AirplayDevice) -> Unit) {
+private fun App(
+    onConnect: (AirplayDevice) -> Unit,
+    onDisconnect: (AirplayDevice) -> Unit
+) {
     val ui by CastController.state.collectAsState()
     val context = LocalContext.current
     var showManual by remember { mutableStateOf(false) }
@@ -148,17 +159,24 @@ private fun App(onConnect: (AirplayDevice) -> Unit) {
             ) {
                 StatusCard(ui)
                 SettingsCard(ui)
-                if (ui.streaming) {
-                    VolumeCard(
+                if (ui.sessions.isNotEmpty()) {
+                    ConnectedCard(
                         ui = ui,
                         onVolume = { CastController.setVolume(it) },
-                        onStop = { CastController.stop(context) }
+                        onMutePhone = { CastController.setMutePhone(context, it) },
+                        onTestTone = { CastController.toggleTestTone(context) },
+                        onDisconnect = onDisconnect,
+                        onStopAll = { CastController.stop(context) }
                     )
-                    LogPanel(ui.logs, modifier = Modifier.weight(1f))
-                } else {
-                    DeviceList(ui, onConnect, onDelete = { CastController.removeManual(it) }, modifier = Modifier.weight(1f))
-                    LogPanel(ui.logs, modifier = Modifier.height(140.dp))
                 }
+                DeviceList(
+                    ui = ui,
+                    onConnect = onConnect,
+                    onDisconnect = onDisconnect,
+                    onDelete = { CastController.removeManual(it) },
+                    modifier = Modifier.weight(1f)
+                )
+                LogPanel(ui.logs, modifier = Modifier.height(140.dp))
             }
         }
     }
@@ -256,7 +274,7 @@ private fun StatusCard(ui: CastController.UiState) {
                 if (ui.discovering) "正在扫描局域网... 已发现 ${ui.devices.size} 个设备" else "设备数: ${ui.devices.size}",
                 style = MaterialTheme.typography.bodyMedium
             )
-            if (ui.connecting) {
+            if (ui.sessions.any { !it.streaming }) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
         }
@@ -264,62 +282,51 @@ private fun StatusCard(ui: CastController.UiState) {
 }
 
 @Composable
-private fun DeviceList(
+private fun ConnectedCard(
     ui: CastController.UiState,
-    onConnect: (AirplayDevice) -> Unit,
-    modifier: Modifier = Modifier,
-    onDelete: (AirplayDevice) -> Unit = {}
+    onVolume: (Float) -> Unit,
+    onMutePhone: (Boolean) -> Unit,
+    onTestTone: () -> Unit,
+    onDisconnect: (AirplayDevice) -> Unit,
+    onStopAll: () -> Unit
 ) {
-    if (ui.devices.isEmpty()) {
-        Text(
-            "没有发现设备。\n请确认手机和 HomePod 连接的是同一个 Wi-Fi；\n如果自动发现不到，点右下角“手动添加”，输入 HomePod 的 IP（端口 7000）。"
-        )
-        return
-    }
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = modifier
-    ) {
-        items(ui.devices, key = { "${it.type}|${it.name}|${it.host}:${it.port}" }) { d ->
-            Card {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(d.name, style = MaterialTheme.typography.titleMedium)
-                        Text(d.model ?: "AirPlay", style = MaterialTheme.typography.bodySmall)
-                        Text("${d.host}:${d.port}", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Button(onClick = { onConnect(d) }, enabled = !ui.connecting) {
-                        Text("连接")
-                    }
-                    if (d.txt.isEmpty()) {
-                        TextButton(onClick = { onDelete(d) }) {
-                            Text("删除")
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun VolumeCard(ui: CastController.UiState, onVolume: (Float) -> Unit, onStop: () -> Unit) {
     val context = LocalContext.current
     Card {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("正在投射", style = MaterialTheme.typography.titleMedium)
-            Button(onClick = { CastController.toggleTestTone(context) }) {
+            Text("已连接 ${ui.connectedCount} 台设备", style = MaterialTheme.typography.titleMedium)
+            // 每路设备状态 + 断开
+            ui.sessions.forEach { session ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(session.device.name, style = MaterialTheme.typography.titleSmall)
+                        Text(session.status, style = MaterialTheme.typography.bodySmall)
+                        Text("${session.device.host}:${session.device.port}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    TextButton(onClick = { onDisconnect(session.device) }) {
+                        Text("断开")
+                    }
+                }
+            }
+            Button(onClick = onTestTone) {
                 Text(if (ui.testToneOn) "停止测试音" else "播放测试音 (440Hz)")
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("静音本机", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "投射时把手机媒体音量调为 0（等效侧键静音，可随时切回）",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Switch(checked = ui.mutePhone, onCheckedChange = onMutePhone)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("音量")
@@ -334,10 +341,62 @@ private fun VolumeCard(ui: CastController.UiState, onVolume: (Float) -> Unit, on
                 Text("${ui.volume.toInt()}%")
             }
             Button(
-                onClick = onStop,
+                onClick = onStopAll,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
             ) {
-                Text("停止投射")
+                Text("断开全部")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceList(
+    ui: CastController.UiState,
+    onConnect: (AirplayDevice) -> Unit,
+    onDisconnect: (AirplayDevice) -> Unit,
+    modifier: Modifier = Modifier,
+    onDelete: (AirplayDevice) -> Unit = {}
+) {
+    if (ui.devices.isEmpty()) {
+        Text(
+            "没有发现设备。\n请确认手机和 HomePod 连接的是同一个 Wi-Fi；\n如果自动发现不到，点右下角“手动添加”，输入 HomePod 的 IP（端口 7000）。"
+        )
+        return
+    }
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = modifier
+    ) {
+        items(ui.devices, key = { "${it.type}|${it.name}|${it.host}:${it.port}" }) { d ->
+            val connected = ui.connectedKeys.contains("${d.host}:${d.port}")
+            Card {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(d.name, style = MaterialTheme.typography.titleMedium)
+                        Text(d.model ?: "AirPlay", style = MaterialTheme.typography.bodySmall)
+                        Text("${d.host}:${d.port}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (connected) {
+                        TextButton(onClick = { onDisconnect(d) }) {
+                            Text("断开")
+                        }
+                    } else {
+                        Button(onClick = { onConnect(d) }) {
+                            Text(if (ui.connectedCount > 0) "添加" else "连接")
+                        }
+                    }
+                    if (d.txt.isEmpty()) {
+                        TextButton(onClick = { onDelete(d) }) {
+                            Text("删除")
+                        }
+                    }
+                }
             }
         }
     }

@@ -36,6 +36,7 @@ Apple's HomePod / HomePod mini only speaks AirPlay 2, and neither Windows nor An
 - 🔧 **Weak-network engine**: non-blocking send queues, hardware-clock pacing, 0x55 loss retransmission (dedup + rate limit), automatic loss-storm shedding
 - 🎚️ **Compressed ALAC toggle**: on by default; turn it off for troubleshooting
 - 🔇 **Volume control**: throttled updates, smooth slider without disconnects
+- 🔕 **Mute phone**: while casting, one tap sets the phone's media volume to 0 so the phone and HomePod don't play at the same time (equivalent to the side-key mute; auto-restored on disconnect)
 - 🎵 **440 Hz test tone**: verify the whole chain in one tap
 - 🔔 **Foreground service**: persistent notification with a stop button
 - 📱 **Non-invasive**: no system modification, no virtual sound card, no root
@@ -109,7 +110,8 @@ DRM-protected content cannot be captured on Android — a system limitation that
 - DRM content cannot be captured (system restriction)
 - Some OEM ROMs require allowing AirBridge to run in the background
 - Apple TV 4K PIN pairing is not implemented yet (HomePod needs no PIN)
-- Multi-room sync / stereo pairs are planned but not yet available
+- **Multi-device is "basic sync"**: multiple HomePods play the same audio at once, but each buffers independently (~1.5s), so devices may be off by sub-second (roughly the gap between taps); sample-accurate alignment / stereo pairs are not implemented yet
+- Audio-only capture relies on Android 14+'s `EXTRA_CAPTURE_AUDIO_ONLY`; below Android 14 only playback audio is captured but the consent dialog still says "screen recording"
 
 ## Roadmap
 
@@ -119,11 +121,12 @@ DRM-protected content cannot be captured on Android — a system limitation that
 - [x] Compressed ALAC encoding (adaptive LPC + per-packet self-verification)
 - [x] Weak-network adaptivity: non-blocking sends / retransmit rate limit / storm shedding
 - [x] Unit tests and GitHub Actions CI
+- [x] Multi-device casting (basic sync: multiple HomePods play the same audio at once)
 - [ ] Windows version (C#/.NET system-audio casting)
 - [ ] Apple TV PIN pairing
 - [ ] Device memory & auto-connect
 - [ ] Cover art / now-playing metadata (DMAP)
-- [ ] Multi-room / stereo pairs
+- [ ] Sample-accurate sync / stereo pairs (multi-room alignment)
 
 ## Credits
 
